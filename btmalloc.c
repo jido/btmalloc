@@ -46,14 +46,10 @@ typedef union
   #define __has_builtin(x) 0  // Compatibility with non-clang compilers.
 #endif
 
-#if __has_builtin(__sync_bool_compare_and_swap)
-#define compare_and_set __sync_bool_compare_and_swap
-#else
-#ifdef GCC
+#if __has_builtin(__sync_bool_compare_and_swap) || defined(__GNUC__)
 #define compare_and_set __sync_bool_compare_and_swap
 #else
 extern int compare_and_set();
-#endif
 #endif
 
 
