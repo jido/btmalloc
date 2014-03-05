@@ -16,6 +16,17 @@ const int uchar_mask = UINT8_MAX;
 const int block_size = 512;
 const int block_alignment = 512;
 
+int fixedsize_mask[] = {
+    0x1,    0x3,    0xF,    0xF };
+int fixedsize_test[] = {
+    0x1,    0x2,    0x4,    0xC };
+int fixedsize_alignment[] = {
+    1,      8,      4,      2 };
+int fixedsize_block_size[] = {
+    8,      128,    248,    504 };
+int fixedsize_shift[] = {
+    1,      2,      4,      4 };
+
 const union
 {
    uint32_t number;
@@ -30,6 +41,21 @@ typedef union
    aligned_uint info;
    uchar byte[alignment];
 } control;
+
+#ifndef __has_builtin         // Optional of course.
+  #define __has_builtin(x) 0  // Compatibility with non-clang compilers.
+#endif
+
+#if __has_builtin(__sync_bool_compare_and_swap)
+#define compare_and_set __sync_bool_compare_and_swap
+#else
+#ifdef GCC
+#define compare_and_set __sync_bool_compare_and_swap
+#else
+extern int compare_and_set();
+#endif
+#endif
+
 
 /*
    Structure of an allocation block:
@@ -144,20 +170,13 @@ typedef union
    This means that the last 8 bytes of each 512-bytes block
    must be left unallocated, unless it is part of a larger
    allocated memory area. Memory cannot be allocated between
-   the end of an area of used memory larger than 512 bytes and
+   the end of an area of used memory larger than 504 bytes and
    the allocation block address which follows.
    
-   To avoid memory wastage, an alternative compact layout is
-   available. This layout can only be used in a delimited 
-   memory region without fixed-size allocation blocks.
-   
-   The compact layout does not rely on the allocation block
-   address being stored on a 512-byte block boundary; instead
-   it is stored just before the allocated memory:
-   
-   .---------.----------------------------------.
-   | address |           used memory            |
-   '--------------------------------------------'
+   For this reason, the end address for a memory allocation
+   larger than 504 bytes falls 8 bytes before a 512-bytes block
+   boundary to avoid memory wastage, unless a different align-
+   ment is specified.
 */
 /*
    Allocation of memory
@@ -189,12 +208,11 @@ typedef union
    When a suitable free slot is found, it is marked as used in
    the bitmap and its address is returned. In case of variable
    size allocation, if the requested size is less than the
-   available size a free allocation slot is inserted after the
-   used slot.
+   available size a neighbouring free allocation slot is resized
+   accordingly if there is one.
    
-   If the free space left between the end of the allocation and
-   the next area of used memory is very large, a new allocation
-   block is created in the free space to manage memory
+   When an allocation block gets full, a new allocation block may
+   be created in the free space that follows to manage memory
    allocation inside it.
    
    Fixed size allocation blocks can be created in the free space
@@ -210,18 +228,15 @@ typedef union
    The algorithm of freeing requires to find the allocation
    block the memory is attached to.
    
-   The allocator first checks if the address falls within a
-   compacted region, in which case the address of the
-   allocation block is stored just before the memory.
-   
-   Otherwise, the last 8 bytes of the 512-byte block situated
-   before the memory address are checked. If it ends with 000,
+   The value of the last 8 bytes of the 512-byte block situated
+   before the memory address is checked. If its lowest byte is 0,
    then the last 8 bytes of the 512-byte block contain the
    address of the allocation block. If it doesn't then the
    memory address is within its own allocation block.
    
-   Adjacent areas of variable size free memory are coalesced
-   together.
+   Once the allocation block is identified the bit corresponding
+   to the allocated memory in the bitmap is set to zero to mark
+   it as available.
 */
 /*
    Concurrency and synchronisation
@@ -257,8 +272,18 @@ typedef union
    Operations involving several slots first marks all these
    slots as used with compare-and-set before continuing.
    
-   TODO: reserved slot update
-   TODO: new alloc block
+   To resize an area of free memory, the free slot is first
+   marked as used then the address pointed by the next slot
+   is adjusted. No other thread must be allowed to modify the
+   address pointed by the next slot.
+   
+   If the resize happens during allocation, then the next slot
+   gets marked as used at the same time as the area of free
+   memory to resize. If the resize happens during creation of
+   a new allocation block, then an imaginary 63rd slot is
+   marked as used at the same time as the area of free memory
+   to resize. No other thread can create a new allocation
+   block if this imaginary slot is used.
 */
 
 
@@ -306,6 +331,75 @@ aligned_uint unrotate(const control *const value)
     // Rotate backwards
     return (value->info << uchar_bits) | value->byte[rightmost];
 }
+
+// Find the allocation block which manages the specified address
+aligned_uint *allocation_block(const void *const allocated)
+{
+    // Check the info block which precedes the 512-bytes block boundary
+    aligned_uint *boundary = (aligned_uint*) ((uintptr_t) allocated & ~(block_size - 1));
+    aligned_uint info = *(boundary - 1);
+    
+    if ( info & uchar_mask )
+    {
+        // The memory is allocated within this 512-bytes block
+        return boundary;
+    }
+    else
+    {
+        // The info block indicates the address of the allocation block
+        assert( info < (uintptr_t) boundary );
+        return (aligned_uint*) info;
+    }
+}
+
+void free_fixed_size_memory(const void *const allocated, aligned_uint *const block)
+{
+    // Address of bitmap
+    aligned_uint *bitmap = block + (block_size / alignment - 1);
+    aligned_uint *next = NULL;
+    aligned_uint b;
+    
+    // Look for the right block within the allocation block
+    do {
+        b = *bitmap;
+        assert( b != 0 );
+        assert( ( ( b & 1 ) && ( (uintptr_t) allocated / alignment == (uintptr_t) bitmap / alignment ) ) || allocated < (void*) bitmap );
+        
+        // Identify the slot size
+        int slot_type;
+        for ( slot_type = 0; slot_type < sizeof fixedsize_mask; ++slot_type )
+        {
+            if ( (b & fixedsize_mask[slot_type]) == fixedsize_test[slot_type] )
+            {
+                // Save the location of the next bitmap (or block info)
+                next = bitmap - (fixedsize_block_size[slot_type] / alignment);
+                break;
+            }
+        }
+        assert( next != NULL );
+        
+        // Check if memory belongs to this block
+        if ( next != NULL && allocated >= (void*) (next + 1) )
+        {
+            // Found the right block
+            intptr_t offset = (allocated - (void*) (next + 1)) / fixedsize_alignment[slot_type];
+            do {
+                // Free memory (busy loop)
+                b = *bitmap;
+                aligned_uint freed = b & ~(1 << (fixedsize_shift[slot_type] + offset));
+                assert( freed != b );   // No other thread should free the slot
+                if ( compare_and_set(bitmap, freed, b) )
+                {
+                    // Success!
+                    return;
+                }
+            } while (1);
+        }
+        // Continue to next block
+        bitmap = next;
+    } while ( bitmap != NULL );
+}
+
 
 int main(int n, char* args[])
 {
