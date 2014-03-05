@@ -23,7 +23,7 @@ int fixedsize_test[] = {
 int fixedsize_alignment[] = {
     1,      8,      4,      2 };
 int fixedsize_block_size[] = {
-    8,      128,    248,    504 };
+    8,      504,    248,    128 };
 int fixedsize_shift[] = {
     1,      2,      4,      4 };
 
