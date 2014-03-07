@@ -353,14 +353,12 @@ void free_fixed_size_memory(const void *const allocated, aligned_uint *const blo
 {
     // Address of bitmap
     aligned_uint *bitmap = block + (block_size / alignment - 1);
-    printf("Allocated: %p\nBlock: %p\nInfo: %p\n", allocated, block, bitmap);
     aligned_uint *next = NULL;
     aligned_uint b;
     
     // Look for the right block within the allocation block
     do {
         b = *bitmap;
-        printf("Bitmap: %llX\n", b);
         assert( b != 0 );
         assert( ( ( b & 1 ) && ( (uintptr_t) allocated / alignment == (uintptr_t) bitmap / alignment ) ) || allocated < (void*) bitmap );
         
@@ -376,15 +374,12 @@ void free_fixed_size_memory(const void *const allocated, aligned_uint *const blo
             }
         }
         assert( slot_type < slot_type_count && next != NULL );
-        printf("Slot type: %d\nNext: %p\n", slot_type, next);
         
         // Check if memory belongs to this block
         if ( next != NULL && allocated >= (void*) (next + 1) )
         {
-            puts("STOP");
             // Found the right block
             intptr_t offset = (allocated - (void*) (next + 1)) / fixedsize_alignment[slot_type];
-            printf("Offset: %ld\n", offset);
             do {
                 // Free memory (busy loop)
                 b = *bitmap;
@@ -395,7 +390,6 @@ void free_fixed_size_memory(const void *const allocated, aligned_uint *const blo
                     --shift;
                 }
                 aligned_uint freed = b & ~(1 << shift);
-                printf("Freed: %llX\n", freed);
                 assert( freed != b );   // No other thread should free the slot
                 if ( compare_and_set(bitmap, b, freed) )
                 {
