@@ -16,22 +16,23 @@ const int uchar_mask = UINT8_MAX;
 const int block_size = 512;
 const int block_alignment = 512;
 
-int fixedsize_mask[] = {
+const int slot_type_count = 4;
+const int fixedsize_mask[slot_type_count] = {
     0x1,    0x3,    0xF,    0xF };
-int fixedsize_test[] = {
+const int fixedsize_test[slot_type_count] = {
     0x1,    0x2,    0x4,    0xC };
-int fixedsize_alignment[] = {
+const int fixedsize_alignment[slot_type_count] = {
     1,      8,      4,      2 };
-int fixedsize_block_size[] = {
+const int fixedsize_block_size[slot_type_count] = {
     8,      504,    248,    128 };
-int fixedsize_shift[] = {
-    1,      2,      4,      4 };
+const int fixedsize_shift[slot_type_count] = {
+    7,      63,     63,     63 };
 
-const union
+union
 {
    uint32_t number;
    uint8_t byte[4];
-} endianness_test = {1};
+} const endianness_test = {1};
 
 #define BIG_ENDIAN_CPU (endianness_test.byte[3])
 #define LITTLE_ENDIAN_CPU (endianness_test.byte[0])
@@ -352,18 +353,20 @@ void free_fixed_size_memory(const void *const allocated, aligned_uint *const blo
 {
     // Address of bitmap
     aligned_uint *bitmap = block + (block_size / alignment - 1);
+    printf("Allocated: %p\nBlock: %p\nInfo: %p\n", allocated, block, bitmap);
     aligned_uint *next = NULL;
     aligned_uint b;
     
     // Look for the right block within the allocation block
     do {
         b = *bitmap;
+        printf("Bitmap: %llX\n", b);
         assert( b != 0 );
         assert( ( ( b & 1 ) && ( (uintptr_t) allocated / alignment == (uintptr_t) bitmap / alignment ) ) || allocated < (void*) bitmap );
         
         // Identify the slot size
         int slot_type;
-        for ( slot_type = 0; slot_type < sizeof fixedsize_mask; ++slot_type )
+        for ( slot_type = 0; slot_type < slot_type_count; ++slot_type )
         {
             if ( (b & fixedsize_mask[slot_type]) == fixedsize_test[slot_type] )
             {
@@ -372,19 +375,29 @@ void free_fixed_size_memory(const void *const allocated, aligned_uint *const blo
                 break;
             }
         }
-        assert( next != NULL );
+        assert( slot_type < slot_type_count && next != NULL );
+        printf("Slot type: %d\nNext: %p\n", slot_type, next);
         
         // Check if memory belongs to this block
         if ( next != NULL && allocated >= (void*) (next + 1) )
         {
+            puts("STOP");
             // Found the right block
             intptr_t offset = (allocated - (void*) (next + 1)) / fixedsize_alignment[slot_type];
+            printf("Offset: %ld\n", offset);
             do {
                 // Free memory (busy loop)
                 b = *bitmap;
-                aligned_uint freed = b & ~(1 << (fixedsize_shift[slot_type] + offset));
+                int shift = (fixedsize_shift[slot_type] - offset);
+                if ( LITTLE_ENDIAN_CPU && slot_type == 0)
+                {
+                    // On little endian, the 8-bit bitmap occupies the leftmost slot
+                    --shift;
+                }
+                aligned_uint freed = b & ~(1 << shift);
+                printf("Freed: %llX\n", freed);
                 assert( freed != b );   // No other thread should free the slot
-                if ( compare_and_set(bitmap, freed, b) )
+                if ( compare_and_set(bitmap, b, freed) )
                 {
                     // Success!
                     return;
@@ -401,8 +414,20 @@ int main(int n, char* args[])
 {
     aligned_uint a = 0x123456789ABCDEF0L;
     control b = {0xDABADABADABADABAL};
+    printf("CPU type: %s endian\n", LITTLE_ENDIAN_CPU? "little": "big");
     printf("a=%llx, b=%llx\n", a, b.info);
     rotate(a, &b);
     printf("b'=%llx, a'=%llx\n", b.info, unrotate(&b));
+    aligned_uint *block;
+    if ( posix_memalign((void**) &block, block_alignment, block_size) == 0 )
+    {
+        int index = block_size / alignment;
+        int bitmap = 0x19;      // 00011001
+        block[--index] = 1;
+        block[--index] = bitmap;
+        free_fixed_size_memory((char*) (block + index) + 3, block);
+        printf("bitmap before free = %X\n", bitmap);
+        printf("bitmap after free = %X\n", (int) block[index]);
+    }
     return 0;
 }
