@@ -7,6 +7,8 @@
 
 typedef uint64_t aligned_uint;
 typedef uint8_t uchar;
+typedef volatile aligned_uint volatile_aligned_uint;
+typedef volatile_aligned_uint *v_aligned_uint_ptr;
 
 #define alignment (sizeof(aligned_uint))
 const int rightmost = alignment - 1;
@@ -27,6 +29,13 @@ const int fixedsize_block_size[slot_type_count] = {
     8,      504,    248,    128 };
 const int fixedsize_shift[slot_type_count] = {
     7,      63,     63,     63 };
+
+#ifndef MAX_HOARD
+#define MAX_HOARD 800
+#endif
+
+__thread void **freed_list = NULL;
+__thread size_t hoard_size = 0;
 
 union
 {
@@ -349,10 +358,19 @@ aligned_uint *allocation_block(const void *const allocated)
     }
 }
 
-void free_fixed_size_memory(const void *const allocated, aligned_uint *const block)
+int clear_bit(v_aligned_uint_ptr bitmap, int shift)
+{
+    aligned_uint b = *bitmap;
+    aligned_uint freed = b & ~(1 << shift);
+    assert( freed != b );   // No other thread should clear the bit
+    return compare_and_set(bitmap, b, freed);
+}
+
+
+void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
 {
     // Address of bitmap
-    aligned_uint *bitmap = block + (block_size / alignment - 1);
+    v_aligned_uint_ptr bitmap = block + (block_size / alignment - 1);
     aligned_uint *next = NULL;
     aligned_uint b;
     
@@ -369,7 +387,7 @@ void free_fixed_size_memory(const void *const allocated, aligned_uint *const blo
             if ( (b & fixedsize_mask[slot_type]) == fixedsize_test[slot_type] )
             {
                 // Save the location of the next bitmap (or block info)
-                next = bitmap - (fixedsize_block_size[slot_type] / alignment);
+                next = (aligned_uint*) bitmap - (fixedsize_block_size[slot_type] / alignment);
                 break;
             }
         }
@@ -380,23 +398,42 @@ void free_fixed_size_memory(const void *const allocated, aligned_uint *const blo
         {
             // Found the right block
             intptr_t offset = (allocated - (void*) (next + 1)) / fixedsize_alignment[slot_type];
-            do {
-                // Free memory (busy loop)
-                b = *bitmap;
-                int shift = (fixedsize_shift[slot_type] - offset);
-                if ( LITTLE_ENDIAN_CPU && slot_type == 0)
+
+            int shift = (fixedsize_shift[slot_type] - offset);
+            if ( LITTLE_ENDIAN_CPU && slot_type == 0)
+            {
+                // On little endian, the 8-bit bitmap occupies the leftmost slot
+                --shift;
+            }
+            
+            // Free memory
+            if ( clear_bit(bitmap, shift) )
+            {
+                // Success!
+                return;
+            }
+            else
+            {
+                int size = fixedsize_alignment[slot_type];
+                if ( size >= sizeof (void*) && hoard_size + size <= MAX_HOARD )
                 {
-                    // On little endian, the 8-bit bitmap occupies the leftmost slot
-                    --shift;
-                }
-                aligned_uint freed = b & ~(1 << shift);
-                assert( freed != b );   // No other thread should free the slot
-                if ( compare_and_set(bitmap, b, freed) )
-                {
-                    // Success!
+                    // Can't free immediately, just hoard for reuse
+                    void **current = freed_list;
+                    freed_list = allocated;
+                    *(void**) allocated = current;
+                    hoard_size += size;
                     return;
                 }
-            } while (1);
+
+                // Won't hoard, try harder to free memory (busy loop)
+                do {
+                    if ( clear_bit(bitmap, shift) )
+                    {
+                        // Success!
+                        return;
+                    }
+                } while (1);
+            }
         }
         // Continue to next block
         bitmap = next;
