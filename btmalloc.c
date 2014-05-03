@@ -16,7 +16,7 @@ const int uchar_bits = 8;
 const int uchar_mask = UINT8_MAX;
 
 const int block_size = 512;
-const int block_alignment = 512;
+const int block_alignment = 512;        // should be a multiple of block_size
 
 const int slot_type_count = 4;
 const int fixedsize_mask[slot_type_count] = {
@@ -358,6 +358,7 @@ aligned_uint *allocation_block(const void *const allocated)
     }
 }
 
+// Clear the specified allocation bit in bitmap
 int clear_bit(v_aligned_uint_ptr bitmap, int shift)
 {
     aligned_uint b = *bitmap;
@@ -366,19 +367,26 @@ int clear_bit(v_aligned_uint_ptr bitmap, int shift)
     return compare_and_set(bitmap, b, freed);
 }
 
-
+// Free a slot in a fixed-size memory allocation block
 void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
 {
+    assert( ((uintptr_t) block) % block_size == 0 );
+    
     // Address of bitmap
     v_aligned_uint_ptr bitmap = block + (block_size / alignment - 1);
     aligned_uint *next = NULL;
     aligned_uint b;
     
-    // Look for the right block within the allocation block
+    // Look for the proper block within the allocation block
     do {
         b = *bitmap;
         assert( b != 0 );
-        assert( ( ( b & 1 ) && ( (uintptr_t) allocated / alignment == (uintptr_t) bitmap / alignment ) ) || allocated < (void*) bitmap );
+        // Memory allocated in a 1B block should share the same 8B
+        // location as the bitmap. The location of memory allocated
+        // in a 2B, 4B or 8B block should precede the bitmap.
+        // If the allocated memory is in a different block then its
+        // location should precede the current block.
+        assert( ( ( b & 1 ) && ( (uintptr_t) allocated / 8 == (uintptr_t) bitmap / 8 ) ) || allocated < (void*) bitmap );
         
         // Identify the slot size
         int slot_type;
@@ -396,14 +404,18 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
         // Check if memory belongs to this block
         if ( next != NULL && allocated >= (void*) (next + 1) )
         {
-            // Found the right block
+            // Found the proper block
+            
+            // Calculate the offset from the start of the block of the
+            // allocated slot and the corresponding bit in the bitmap
             intptr_t offset = (allocated - (void*) (next + 1)) / fixedsize_alignment[slot_type];
-
             int shift = (fixedsize_shift[slot_type] - offset);
             if ( LITTLE_ENDIAN_CPU && slot_type == 0)
             {
-                // On little endian, the 8-bit bitmap occupies the leftmost slot
-                --shift;
+                // On little endian, the 8-bit bitmap occupies the leftmost
+                // slot so first available slot is the second of the block
+                assert( offset > 0 );
+                ++shift;
             }
             
             // Free memory
@@ -414,10 +426,14 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
             }
             else
             {
+                // Failed - the bitmap was updated concurrently
+                
+                // If the slot is large enough for a pointer and we are
+                // not going over the quota then hoard for reuse
                 int size = fixedsize_alignment[slot_type];
                 if ( size >= sizeof (void*) && hoard_size + size <= MAX_HOARD )
                 {
-                    // Can't free immediately, just hoard for reuse
+                    // Insert as head of freed memory hoarding list
                     void **current = freed_list;
                     freed_list = allocated;
                     *(void**) allocated = current;
@@ -456,7 +472,7 @@ int main(int n, char* args[])
         int bitmap = 0x19;      // 00011001
         block[--index] = 1;
         block[--index] = bitmap;
-        free_fixed_size_memory((char*) (block + index) + 3, block);
+        free_fixed_size_memory((char*) (block + index) + 4, block);
         printf("bitmap before free = %X\n", bitmap);
         printf("bitmap after free = %X\n", (int) block[index]);
     }
