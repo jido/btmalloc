@@ -19,6 +19,7 @@ const int block_size = 512;
 const int block_alignment = 512;        // should be a multiple of block_size
 
 const int slot_type_count = 4;
+const int biggest_slot = 1;
 const int fixedsize_mask[slot_type_count] = {
     0x1,    0x3,    0xF,    0xF };
 const int fixedsize_test[slot_type_count] = {
@@ -37,6 +38,26 @@ const int fixedsize_shift[slot_type_count] = {
 __thread void **freed_list = NULL;
 __thread size_t hoard_size = 0;
 
+#if defined USE_PTHREAD || !defined MUTEX_TYPE
+#include <pthread.h>
+
+typedef pthread_mutex_t mutex;
+#define mutex_init(M) pthread_mutex_init(M, NULL)
+#define mutex_lock pthread_mutex_lock
+#define mutex_unlock pthread_mutex_unlock
+#define mutex_destroy pthread_mutex_destroy
+
+#else
+typedef MUTEX_TYPE mutex;
+extern void mutex_init(mutex*);
+extern int mutex_lock(mutex*);
+extern int mutex_unlock(mutex*);
+extern int mutex_destroy(mutex*);      // returns non-zero if mutex locked
+#endif
+
+void *heap_start = NULL;
+mutex heap_init_lock;
+
 union
 {
    uint32_t number;
@@ -52,8 +73,8 @@ typedef union
    uchar byte[alignment];
 } control;
 
-#ifndef __has_builtin         // Optional of course.
-  #define __has_builtin(x) 0  // Compatibility with non-clang compilers.
+#ifndef __has_builtin
+#define __has_builtin(x) 0  // for non-clang compilers.
 #endif
 
 #if __has_builtin(__sync_bool_compare_and_swap) || defined(__GNUC__)
