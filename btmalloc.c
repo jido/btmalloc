@@ -15,6 +15,12 @@ const int rightmost = alignment - 1;
 const int uchar_bits = 8;
 const int uchar_mask = UINT8_MAX;
 
+typedef union
+{
+   aligned_uint info;
+   uchar byte[alignment];
+} control;
+
 const int block_size = 512;
 const int block_alignment = 512;        // should be a multiple of block_size
 
@@ -58,6 +64,26 @@ extern int mutex_destroy(mutex*);      // returns non-zero if mutex locked
 void *heap_start = NULL;
 mutex heap_init_lock;
 
+typedef struct cached_block
+{
+    control *block_info;
+    struct cached_block *next;
+} cached_block;
+__thread cached_block *cache = NULL;
+__thread int cache_misses = 0;
+
+
+const int predictor_size = 12;          // should be at least slot_size_count + predictor_fuzz + 2
+const int predictor_fuzz = 4;
+const int p_fuzz_left = (predictor_fuzz - 1) / 2;
+
+const uint32_t p_compress_threshold = 1000;
+
+__thread size_t predictor[predictor_size] = {1, 2, 4, 8};
+__thread int median;
+__thread uint32_t p_count[predictor_size + 1];  // include a sentinel
+__thread uint32_t p_total = 0;
+
 union
 {
    uint32_t number;
@@ -66,12 +92,6 @@ union
 
 #define BIG_ENDIAN_CPU (endianness_test.byte[3])
 #define LITTLE_ENDIAN_CPU (endianness_test.byte[0])
-
-typedef union
-{
-   aligned_uint info;
-   uchar byte[alignment];
-} control;
 
 #ifndef __has_builtin
 #define __has_builtin(x) 0  // for non-clang compilers.
@@ -248,6 +268,45 @@ extern int compare_and_set();
    
    The last allocation block in memory is always a variable size
    allocation block which manages the wilderness area.
+*/
+/*
+   The predictor tries to guess what is the size most likely to
+   be needed for a new allocation.
+
+   There is one predictor per thread.
+
+   The predictor array contains allocation sizes. The first
+   values correspond to fixed-size allocation sizes. The
+   following values correspond to variable allocation sizes; they
+   are multiples of 8. If an allocation size falls between two 
+   values in the array, it counts towards the largest of the two.
+
+   Each time a block is added to the cache due to a cache miss,
+   or a new fixed-size block is created to allow the allocation, 
+   the count for that allocation size increases in the predictor.
+
+   The median is calculated by adding the counts for each 
+   successive allocation size until the sum reaches half of the 
+   total count. This indicates the median allocation size.
+
+   Since the predictor does not contain entries for all possible 
+   allocation sizes, only sizes within the "fuzz" zone are 
+   precisely tracked. If the allocation size falls in the "fuzz" 
+   zone but does not match an existing predictor value, the 
+   allocation size with the lowest count gets removed to make 
+   place for the new allocation size. However allocation sizes 
+   within the "fuzz" zone and sizes that fall in the fixed-size 
+   allocation range never get removed. Neither does the last size.
+
+   The count for a removed predictor value is added to the next 
+   value count.
+   When a new predictor value is added, it takes away half of the 
+   next value count for itself.
+
+   To make the old counts for the different predictor values age, 
+   after a particular threshold of the total count each count in 
+   the predictor is halved. The total is recalculated based on the 
+   new counts.
 */
 /*
    Freeing of memory
