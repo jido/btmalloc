@@ -38,7 +38,7 @@ const int fixedsize_shift[slot_type_count] = {
     7,      63,     63,     63 };
 
 #ifndef MAX_HOARD
-#define MAX_HOARD 800
+#define MAX_HOARD 3000
 #endif
 
 __thread void **freed_list = NULL;
@@ -58,7 +58,7 @@ typedef MUTEX_TYPE mutex;
 extern void mutex_init(mutex*);
 extern int mutex_lock(mutex*);
 extern int mutex_unlock(mutex*);
-extern int mutex_destroy(mutex*);      // returns non-zero if mutex locked
+extern int mutex_destroy(mutex*);       // returns non-zero if mutex locked
 #endif
 
 void *heap_start = NULL;
@@ -87,14 +87,14 @@ __thread uint32_t p_total = 0;
 union
 {
    uint32_t number;
-   uint8_t byte[4];
+   uint8_t byte[4];             // guaranteed to be aligned with number
 } const endianness_test = {1};
 
 #define BIG_ENDIAN_CPU (endianness_test.byte[3])
 #define LITTLE_ENDIAN_CPU (endianness_test.byte[0])
 
 #ifndef __has_builtin
-#define __has_builtin(x) 0  // for non-clang compilers.
+#define __has_builtin(x) 0      // for non-clang compilers.
 #endif
 
 #if __has_builtin(__sync_bool_compare_and_swap) || defined(__GNUC__)
@@ -169,8 +169,8 @@ extern int compare_and_set();
    
    The info block also contains a 62 bit bitmap indicating if
    each slot is free memory or not. The last slot is reserved
-   for the address of the next control block (if used) or the
-   wilderness area (if free).
+   for the address of the next control block or the wilderness 
+   area.
    
    The organisation of each slot is given by its rightmost byte
    as follows:
@@ -249,6 +249,11 @@ extern int compare_and_set();
    blocks it used. These are checked first, starting with the
    most recent. This helps with memory locality.
    
+   Threads in highly congested state also keep aside a small
+   amount of memory from recent deallocations for reuse. This
+   freed memory list is checked before looking for non-cached
+   allocation blocks.
+   
    For sizes up to 8 bytes, a slot in a fixed allocation block
    is preferred.
    
@@ -323,6 +328,15 @@ extern int compare_and_set();
    Once the allocation block is identified the bit corresponding
    to the allocated memory in the bitmap is set to zero to mark
    it as available.
+   
+   If the bitmap is updated concurrently, the zeroing of the bit
+   fails. If the allocated size is less than a limit and big
+   enough to hold a pointer, the memory is added to a thread-
+   local freed memory list. This makes a small reserve for
+   allocation.
+   
+   If zeroing fails and the memory cannot be added to the freed
+   list, then the thread tries harder to set the bit to zero.
 */
 /*
    Concurrency and synchronisation
@@ -351,7 +365,8 @@ extern int compare_and_set();
    When freeing memory, if the slot needs to be modified
    this is done first while the slot is marked as used, then
    the bitmap is updated using compare-and-set. If the bitmap
-   compare fails the operation is restarted from the
+   compare fails an alternative operation is attempted; if
+   that fails too the bitmap operation is restarted from the
    beginning.
    
    No operation modifies a slot which is marked as free.
