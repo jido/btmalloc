@@ -265,7 +265,8 @@ extern int compare_and_set();
    
    When an allocation block gets full, a new allocation block may
    be created in the free space that follows to manage memory
-   allocation inside it.
+   allocation inside it. A predictor is used to estimate the free
+   space needs of an allocation block.
    
    Fixed size allocation blocks can be created in the free space
    between the last area of used memory and the next allocation
@@ -433,6 +434,11 @@ aligned_uint unrotate(const control *const value)
     return (value->info << uchar_bits) | value->byte[rightmost];
 }
 
+
+/*
+    Memory freeing
+*/
+
 // Find the allocation block which manages the specified address
 aligned_uint *allocation_block(const void *const allocated)
 {
@@ -460,6 +466,27 @@ int clear_bit(v_aligned_uint_ptr bitmap, int shift)
     aligned_uint freed = b & ~(1 << shift);
     assert( freed != b );   // No other thread should clear the bit
     return compare_and_set(bitmap, b, freed);
+}
+
+// Try hoarding freed memory for reuse
+int hoard_freed(size_t size, void *const memory)
+{
+    // If the slot is large enough for a pointer and we are
+    // not going over the quota then we can hoard
+    if ( size < sizeof (void*) || hoard_size + size > MAX_HOARD )
+    {
+        // Not enough space in slot or in hoard
+        return 0;
+    }
+    else
+    {
+        // Insert as head of freed memory hoarding list
+        void **current = freed_list;
+        freed_list = memory;
+        *(void**) memory = current;
+        hoard_size += size;
+        return 1;
+    }
 }
 
 // Free a slot in a fixed-size memory allocation block
@@ -522,17 +549,12 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
             else
             {
                 // Failed - the bitmap was updated concurrently
-                
-                // If the slot is large enough for a pointer and we are
-                // not going over the quota then hoard for reuse
                 int size = fixedsize_alignment[slot_type];
-                if ( size >= sizeof (void*) && hoard_size + size <= MAX_HOARD )
+
+                // Let's try hoarding
+                if ( hoard_freed(size, allocated) )
                 {
-                    // Insert as head of freed memory hoarding list
-                    void **current = freed_list;
-                    freed_list = allocated;
-                    *(void**) allocated = current;
-                    hoard_size += size;
+                    // It worked!
                     return;
                 }
 
