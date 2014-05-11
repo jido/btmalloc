@@ -34,8 +34,6 @@ const int fixedsize_alignment[slot_type_count] = {
     1,      8,      4,      2 };
 const int fixedsize_block_size[slot_type_count] = {
     8,      504,    248,    128 };
-const int fixedsize_shift[slot_type_count] = {
-    7,      63,     63,     63 };
 
 #ifndef MAX_HOARD
 #define MAX_HOARD 3000
@@ -459,11 +457,11 @@ aligned_uint *allocation_block(const void *const allocated)
     }
 }
 
+// Identify the slot size from the bitmap
 int bitmap_slot_type(aligned_uint b)
 {
     assert( b != 0 );
     
-    // Identify the slot size
     int slot_type;
     for ( slot_type = 0; slot_type < slot_type_count; ++slot_type )
     {
@@ -475,6 +473,8 @@ int bitmap_slot_type(aligned_uint b)
     return -1;
 }
 
+// Locate the bitmap of a fixed-size block corresponding to
+// the specified memory slot
 aligned_uint *fixedsize_block(const void *const allocated)
 {
     aligned_uint *const block = (aligned_uint*) ((uintptr_t) allocated & ~(block_size - 1));
@@ -482,33 +482,30 @@ aligned_uint *fixedsize_block(const void *const allocated)
     // Address of bitmap
     aligned_uint *bitmap = block + (block_size / alignment - 1);
     aligned_uint *next = NULL;
-    aligned_uint b;
     
     // Look for the proper block within the allocation block
     do {
-        b = *bitmap;
-        assert( b != 0 );
-        // Memory allocated in a 1B block should share the same 8B
-        // location as the bitmap. The location of memory allocated
-        // in a 2B, 4B or 8B block should precede the bitmap.
-        // If the allocated memory is in a different block then its
-        // location should precede the current block.
-        assert( ( ( b & 1 ) && ( (uintptr_t) allocated / 8 == (uintptr_t) bitmap / 8 ) ) || allocated < (void*) bitmap );
+        assert( bitmap >= block && *bitmap != 0 );
         
-        // Identify the slot size
-        int slot_type = bitmap_slot_type(b);
+        // Identify the slot type
+        int slot_type = bitmap_slot_type(*bitmap);
         assert( slot_type != -1 );
+        
+        // Calculate the address of the next bitmap (or info block)
         next = (aligned_uint*) ((void*) bitmap - fixedsize_block_size[slot_type]);
+        // The start of the current block should be within the
+        // allocation block
+        assert( next + 1 >= block );
         
         // Check if memory belongs to this block
         if ( allocated >= (void*) (next + 1) )
         {
-            assert( next + 1 >= block );
+            // Found it!
             return bitmap;
         }
+        
         // Continue to next block
         bitmap = next;
-        assert( bitmap >= block );
     } while (1);
 }
 
