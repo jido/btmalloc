@@ -459,6 +459,60 @@ aligned_uint *allocation_block(const void *const allocated)
     }
 }
 
+int bitmap_slot_type(aligned_uint b)
+{
+    assert( b != 0 );
+    
+    // Identify the slot size
+    int slot_type;
+    for ( slot_type = 0; slot_type < slot_type_count; ++slot_type )
+    {
+        if ( (b & fixedsize_mask[slot_type]) == fixedsize_test[slot_type] )
+        {
+            return slot_type;
+        }
+    }
+    return -1;
+}
+
+aligned_uint *fixedsize_block(const void *const allocated)
+{
+    aligned_uint *const block = (aligned_uint*) ((uintptr_t) allocated & ~(block_size - 1));
+    
+    // Address of bitmap
+    aligned_uint *bitmap = block + (block_size / alignment - 1);
+    aligned_uint *next = NULL;
+    aligned_uint b;
+    
+    // Look for the proper block within the allocation block
+    do {
+        b = *bitmap;
+        assert( b != 0 );
+        // Memory allocated in a 1B block should share the same 8B
+        // location as the bitmap. The location of memory allocated
+        // in a 2B, 4B or 8B block should precede the bitmap.
+        // If the allocated memory is in a different block then its
+        // location should precede the current block.
+        assert( ( ( b & 1 ) && ( (uintptr_t) allocated / 8 == (uintptr_t) bitmap / 8 ) ) || allocated < (void*) bitmap );
+        
+        // Identify the slot size
+        int slot_type = bitmap_slot_type(b);
+        assert( slot_type != -1 );
+        next = (aligned_uint*) bitmap - (fixedsize_block_size[slot_type] / alignment);
+        
+        // Check if memory belongs to this block
+        if ( next != NULL && allocated >= (void*) (next + 1) )
+        {
+            assert( next + 1 >= block );
+            return bitmap;
+        }
+        // Continue to next block
+        bitmap = next;
+    }
+    while ( bitmap != NULL );
+    return NULL;
+}
+
 // Clear the specified allocation bit in bitmap
 int clear_bit(v_aligned_uint_ptr bitmap, int shift)
 {
@@ -489,88 +543,74 @@ int hoard_freed(size_t size, void *const memory)
     }
 }
 
+// Take out the selected slot from the freed list
+void *unhoard(void **next)
+{
+    void *selection = *next;
+    assert( selection != NULL );
+    *next = *(void**) selection;        // replace pointed value
+    return selection;
+}
+
 // Free a slot in a fixed-size memory allocation block
 void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
 {
     assert( ((uintptr_t) block) % block_size == 0 );
     
     // Address of bitmap
-    v_aligned_uint_ptr bitmap = block + (block_size / alignment - 1);
-    aligned_uint *next = NULL;
-    aligned_uint b;
+    v_aligned_uint_ptr bitmap = fixedsize_block(allocated);
+    assert( *bitmap != 0 );
+
+    // Memory allocated in a 1B block should share the same 8B
+    // location as the bitmap. The location of memory allocated
+    // in a 2B, 4B or 8B block should precede the bitmap.
+    assert( ( ( *bitmap & 1 ) && ( (uintptr_t) allocated / 8 == (uintptr_t) bitmap / 8 ) ) || allocated < (void*) bitmap );
     
-    // Look for the proper block within the allocation block
-    do {
-        b = *bitmap;
-        assert( b != 0 );
-        // Memory allocated in a 1B block should share the same 8B
-        // location as the bitmap. The location of memory allocated
-        // in a 2B, 4B or 8B block should precede the bitmap.
-        // If the allocated memory is in a different block then its
-        // location should precede the current block.
-        assert( ( ( b & 1 ) && ( (uintptr_t) allocated / 8 == (uintptr_t) bitmap / 8 ) ) || allocated < (void*) bitmap );
-        
-        // Identify the slot size
-        int slot_type;
-        for ( slot_type = 0; slot_type < slot_type_count; ++slot_type )
+    // Identify the slot size
+    int slot_type = bitmap_slot_type(*bitmap);
+    // Save the location of the next bitmap (or block info)
+    assert( slot_type != -1 );
+    aligned_uint *next = (aligned_uint*) bitmap - (fixedsize_block_size[slot_type] / alignment);
+    
+    // Calculate the offset from the start of the block of the
+    // allocated slot and the corresponding bit in the bitmap
+    intptr_t offset = (allocated - (void*) (next + 1)) / fixedsize_alignment[slot_type];
+    int shift = (fixedsize_shift[slot_type] - offset);
+    if ( LITTLE_ENDIAN_CPU && slot_type == 0)
+    {
+        // On little endian, the 8-bit bitmap occupies the leftmost
+        // slot so first available slot is the second of the block
+        assert( offset > 0 );
+        ++shift;
+    }
+    
+    // Free memory
+    if ( clear_bit(bitmap, shift) )
+    {
+        // Success!
+        return;
+    }
+    else
+    {
+        // Failed - the bitmap was updated concurrently
+        int size = fixedsize_alignment[slot_type];
+
+        // Let's try hoarding
+        if ( hoard_freed(size, allocated) )
         {
-            if ( (b & fixedsize_mask[slot_type]) == fixedsize_test[slot_type] )
-            {
-                // Save the location of the next bitmap (or block info)
-                next = (aligned_uint*) bitmap - (fixedsize_block_size[slot_type] / alignment);
-                break;
-            }
+            // It worked!
+            return;
         }
-        assert( slot_type < slot_type_count && next != NULL );
-        
-        // Check if memory belongs to this block
-        if ( next != NULL && allocated >= (void*) (next + 1) )
-        {
-            // Found the proper block
-            
-            // Calculate the offset from the start of the block of the
-            // allocated slot and the corresponding bit in the bitmap
-            intptr_t offset = (allocated - (void*) (next + 1)) / fixedsize_alignment[slot_type];
-            int shift = (fixedsize_shift[slot_type] - offset);
-            if ( LITTLE_ENDIAN_CPU && slot_type == 0)
-            {
-                // On little endian, the 8-bit bitmap occupies the leftmost
-                // slot so first available slot is the second of the block
-                assert( offset > 0 );
-                ++shift;
-            }
-            
-            // Free memory
+
+        // Won't hoard, try harder to free memory (busy loop)
+        do {
             if ( clear_bit(bitmap, shift) )
             {
                 // Success!
                 return;
             }
-            else
-            {
-                // Failed - the bitmap was updated concurrently
-                int size = fixedsize_alignment[slot_type];
-
-                // Let's try hoarding
-                if ( hoard_freed(size, allocated) )
-                {
-                    // It worked!
-                    return;
-                }
-
-                // Won't hoard, try harder to free memory (busy loop)
-                do {
-                    if ( clear_bit(bitmap, shift) )
-                    {
-                        // Success!
-                        return;
-                    }
-                } while (1);
-            }
-        }
-        // Continue to next block
-        bitmap = next;
-    } while ( bitmap != NULL );
+        } while (1);
+    }
 }
 
 
