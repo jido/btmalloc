@@ -542,10 +542,10 @@ int hoard_freed(size_t size, void *const memory)
 // Take out the selected slot from the freed list
 void *unhoard(void **next)
 {
-    void *selection = *next;
-    assert( selection != NULL );
-    *next = *(void**) selection;        // replace pointed value
-    return selection;
+    void *memory = *next;
+    assert( memory != NULL );
+    *next = *(void**) memory;        // replace pointed value
+    return memory;
 }
 
 // Free a slot in a fixed-size memory allocation block
