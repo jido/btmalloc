@@ -498,19 +498,18 @@ aligned_uint *fixedsize_block(const void *const allocated)
         // Identify the slot size
         int slot_type = bitmap_slot_type(b);
         assert( slot_type != -1 );
-        next = (aligned_uint*) bitmap - (fixedsize_block_size[slot_type] / alignment);
+        next = (aligned_uint*) ((void*) bitmap - fixedsize_block_size[slot_type]);
         
         // Check if memory belongs to this block
-        if ( next != NULL && allocated >= (void*) (next + 1) )
+        if ( allocated >= (void*) (next + 1) )
         {
             assert( next + 1 >= block );
             return bitmap;
         }
         // Continue to next block
         bitmap = next;
-    }
-    while ( bitmap != NULL );
-    return NULL;
+        assert( bitmap >= block );
+    } while (1);
 }
 
 // Clear the specified allocation bit in bitmap
@@ -561,28 +560,19 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
     v_aligned_uint_ptr bitmap = fixedsize_block(allocated);
     assert( *bitmap != 0 );
 
-    // Memory allocated in a 1B block should share the same 8B
-    // location as the bitmap. The location of memory allocated
-    // in a 2B, 4B or 8B block should precede the bitmap.
-    assert( ( ( *bitmap & 1 ) && ( (uintptr_t) allocated / 8 == (uintptr_t) bitmap / 8 ) ) || allocated < (void*) bitmap );
-    
     // Identify the slot size
     int slot_type = bitmap_slot_type(*bitmap);
-    // Save the location of the next bitmap (or block info)
     assert( slot_type != -1 );
-    aligned_uint *next = (aligned_uint*) bitmap - (fixedsize_block_size[slot_type] / alignment);
     
-    // Calculate the offset from the start of the block of the
-    // allocated slot and the corresponding bit in the bitmap
-    intptr_t offset = (allocated - (void*) (next + 1)) / fixedsize_alignment[slot_type];
-    int shift = (fixedsize_shift[slot_type] - offset);
-    if ( LITTLE_ENDIAN_CPU && slot_type == 0)
+    // Calculate the shift of the corresponding bit in the bitmap
+    int offset = 0;
+    if ( slot_type == 0 )
     {
         // On little endian, the 8-bit bitmap occupies the leftmost
-        // slot so first available slot is the second of the block
-        assert( offset > 0 );
-        ++shift;
+        // slot; otherwise the rightmost
+        offset = fixedsize_block_size[0] - ( LITTLE_ENDIAN_CPU? 0: 1 );
     }
+    int shift = ((void*) bitmap + offset - allocated) / fixedsize_alignment[slot_type];
     
     // Free memory
     if ( clear_bit(bitmap, shift) )
