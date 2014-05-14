@@ -548,6 +548,25 @@ void *unhoard(void **next)
     return memory;
 }
 
+// Calculate the shift of the corresponding bit in the bitmap
+int get_shift(void *const address, void *const bitmap, int slot_type)
+{
+    int slot_size = alignment;
+    int offset = 0;
+    if ( slot_type != -1 )
+    {
+        // Fixed-size allocation block
+        slot_size = fixedsize_alignment[slot_type];
+        if ( slot_type == 0 )
+        {
+            // On little endian, the 8-bit bitmap occupies the leftmost
+            // slot; otherwise the rightmost
+            offset = fixedsize_block_size[0] - ( LITTLE_ENDIAN_CPU? 0: 1 );
+        }
+    }
+    return (bitmap + offset - address) / slot_size;
+}
+
 // Free a slot in a fixed-size memory allocation block
 void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
 {
@@ -561,15 +580,8 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
     int slot_type = bitmap_slot_type(*bitmap);
     assert( slot_type != -1 );
     
-    // Calculate the shift of the corresponding bit in the bitmap
-    int offset = 0;
-    if ( slot_type == 0 )
-    {
-        // On little endian, the 8-bit bitmap occupies the leftmost
-        // slot; otherwise the rightmost
-        offset = fixedsize_block_size[0] - ( LITTLE_ENDIAN_CPU? 0: 1 );
-    }
-    int shift = ((void*) bitmap + offset - allocated) / fixedsize_alignment[slot_type];
+    // Get the shift of the bit in the bitmap
+    int shift = get_shift(allocated, (void*) bitmap, slot_type);
     
     // Free memory
     if ( clear_bit(bitmap, shift) )
@@ -580,10 +592,9 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
     else
     {
         // Failed - the bitmap was updated concurrently
-        int size = fixedsize_alignment[slot_type];
 
         // Let's try hoarding
-        if ( hoard_freed(size, allocated) )
+        if ( hoard_freed(fixedsize_alignment[slot_type], allocated) )
         {
             // It worked!
             return;
