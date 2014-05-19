@@ -24,7 +24,7 @@ typedef union
 const int block_size = 512;
 const int block_alignment = 512;        // should be a multiple of block_size
 
-const int slot_type_count = 4;
+#define slot_type_count 4
 const int biggest_slot = 1;
 const int fixedsize_mask[slot_type_count] = {
     0x1,    0x3,    0xF,    0xF };
@@ -71,8 +71,8 @@ __thread cached_block *cache = NULL;
 __thread int cache_misses = 0;
 
 
-const int predictor_size = 12;          // should be at least slot_size_count + predictor_fuzz + 2
-const int predictor_fuzz = 4;
+#define predictor_size 12          // should be at least slot_size_count + predictor_fuzz + 2
+#define predictor_fuzz 4
 const int p_fuzz_left = (predictor_fuzz - 1) / 2;
 
 const uint32_t p_compress_threshold = 1000;
@@ -441,7 +441,7 @@ aligned_uint unrotate(const control *const value)
 aligned_uint *allocation_block(const void *const allocated)
 {
     // Check the info block which precedes the 512-bytes block boundary
-    aligned_uint *boundary = (aligned_uint*) ((uintptr_t) allocated & ~(block_size - 1));
+    aligned_uint *boundary = (aligned_uint*) ((uintptr_t) allocated & ~((uintptr_t) block_size - 1));
     aligned_uint info = *(boundary - 1);
     
     if ( info & uchar_mask )
@@ -477,7 +477,7 @@ int bitmap_slot_type(aligned_uint b)
 // the specified memory slot
 aligned_uint *fixedsize_block(const void *const allocated)
 {
-    aligned_uint *const block = (aligned_uint*) ((uintptr_t) allocated & ~(block_size - 1));
+    aligned_uint *const block = (aligned_uint*) ((uintptr_t) allocated & ~((uintptr_t) block_size - 1));
     
     // Address of bitmap
     aligned_uint *bitmap = block + (block_size / alignment - 1);
@@ -492,7 +492,7 @@ aligned_uint *fixedsize_block(const void *const allocated)
         assert( slot_type != -1 );
         
         // Calculate the address of the next bitmap (or info block)
-        next = (aligned_uint*) ((void*) bitmap - fixedsize_block_size[slot_type]);
+        next = (aligned_uint*) ((char*) bitmap - fixedsize_block_size[slot_type]);
         // The start of the current block should be within the
         // allocation block
         assert( next + 1 >= block );
@@ -513,7 +513,7 @@ aligned_uint *fixedsize_block(const void *const allocated)
 int clear_bit(v_aligned_uint_ptr bitmap, int shift)
 {
     aligned_uint b = *bitmap;
-    aligned_uint freed = b & ~(1 << shift);
+    aligned_uint freed = b & ~(((aligned_uint) 1) << shift);
     assert( freed != b );   // No other thread should clear the bit
     return compare_and_set(bitmap, b, freed);
 }
@@ -569,7 +569,7 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
         // slot; otherwise the rightmost
         offset = fixedsize_block_size[0] - ( LITTLE_ENDIAN_CPU? 0: 1 );
     }
-    int shift = ((void*) bitmap + offset - allocated) / fixedsize_alignment[slot_type];
+    int shift = ((char*) bitmap + offset - (char*) allocated) / fixedsize_alignment[slot_type];
     
     // Free memory
     if ( clear_bit(bitmap, shift) )
@@ -580,7 +580,7 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
     else
     {
         // Failed - the bitmap was updated concurrently
-        int size = fixedsize_alignment[slot_type];
+        size_t size = fixedsize_alignment[slot_type];
 
         // Let's try hoarding
         if ( hoard_freed(size, allocated) )
@@ -606,19 +606,19 @@ int main(int n, char* args[])
     aligned_uint a = 0x123456789ABCDEF0L;
     control b = {0xDABADABADABADABAL};
     printf("CPU type: %s endian\n", LITTLE_ENDIAN_CPU? "little": "big");
-    printf("a=%llx, b=%llx\n", a, b.info);
+    printf("a=%lx, b=%lx\n", (uint64_t) a, (uint64_t) b.info);
     rotate(a, &b);
-    printf("b'=%llx, a'=%llx\n", b.info, unrotate(&b));
+    printf("b'=%lx, a'=%lx\n", (uint64_t) b.info, (uint64_t) unrotate(&b));
     aligned_uint *block;
     if ( posix_memalign((void**) &block, block_alignment, block_size) == 0 )
     {
         int index = block_size / alignment;
-        int bitmap = 0x19;      // 00011001
+        aligned_uint bitmap = 0x19;      // 00011001
         block[--index] = 1;
         block[--index] = bitmap;
         free_fixed_size_memory((char*) (block + index) + 4, block);
-        printf("bitmap before free = %X\n", bitmap);
-        printf("bitmap after free = %X\n", (int) block[index]);
+        printf("bitmap before free = %lX\n", bitmap);
+        printf("bitmap after free = %lX\n", block[index]);
     }
     return 0;
 }
