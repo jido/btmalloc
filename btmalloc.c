@@ -169,31 +169,9 @@ extern int compare_and_set();
    each slot is free memory or not. The last slot is reserved
    for the address of the next control block or the wilderness 
    area.
-   
-   The organisation of each slot is given by its rightmost byte
-   as follows:
-   
-   .----------------------------.-------------------------------.
-   |  Rightmost byte            |  Slot contents                |
-   |----------------------------|-------------------------------|
-   |        .....001            |     1B 8-aligned memory       |
-   |        .....010            |     2B 8-aligned memory       |
-   |        .....011            |     3B 8-aligned memory       |
-               .                               .
-               .                               .
-               .                               .
-   |        .....111            |     7B 8-aligned memory       |
-   |        .....000            |     memory address            |
-   '------------------------------------------------------------'
-   
-   For sizes up to seven bytes, the memory is allocated
-   directly in the slot.
-   
-   For sizes of eight bytes or more, the slot contains the
-   address of allocation memory. It is rounded up by 8 so that
-   it always ends with 000. On little endian processors, the
-   address is rotated left so that the least significant byte
-   always occupies the rightmost position.
+      
+   Each slot in the allocation block contains the address of
+   allocation memory. This address is always 8-aligned.
    
    Areas of allocation memory are contiguous. The size of an
    area of allocation memory can be computed by taking the
@@ -387,51 +365,6 @@ extern int compare_and_set();
 */
 
 
-/*
-   Bit fiddling functions for the address of an allocation
-   area
-*/
-
-// Quickly rotate the value least significant byte (LSB) so
-// that the destination ends with 000
-void rotate(aligned_uint value, control *const destination)
-{
-    assert( value / alignment * alignment == value );
-    
-    if ( BIG_ENDIAN_CPU || sizeof (void*) < alignment )
-    {
-        // The LSB is already in rightmost position if the CPU
-        // is big endian. If the CPU is little endian but
-        // addresses are less than 64 bits, the most signifi-
-        // cant byte (MSB) is always 0 so no need to rotate.
-        destination->info = value;
-        
-        assert( BIG_ENDIAN_CPU || destination->byte[rightmost] == 0 );
-    }
-    else
-    {
-        assert( LITTLE_ENDIAN_CPU );
-        
-        destination->info = value >> uchar_bits;
-        destination->byte[rightmost] = (uchar) value;
-    }
-}
-
-// Rotate in reverse direction to move the LSB back to its
-// place so the address can be used
-aligned_uint unrotate(const control *const value)
-{
-    if ( BIG_ENDIAN_CPU || sizeof (void*) < alignment )
-    {
-        // Value is not rotated
-        return value->info;
-    }
-    assert( LITTLE_ENDIAN_CPU );
-        
-    // Rotate backwards
-    return (value->info << uchar_bits) | value->byte[rightmost];
-}
-
 
 /*
     Memory freeing
@@ -603,12 +536,7 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
 
 int main(int n, char* args[])
 {
-    aligned_uint a = 0x123456789ABCDEF0L;
-    control b = {0xDABADABADABADABAL};
     printf("CPU type: %s endian\n", LITTLE_ENDIAN_CPU? "little": "big");
-    printf("a=%lx, b=%lx\n", (uint64_t) a, (uint64_t) b.info);
-    rotate(a, &b);
-    printf("b'=%lx, a'=%lx\n", (uint64_t) b.info, (uint64_t) unrotate(&b));
     aligned_uint *block;
     if ( posix_memalign((void**) &block, block_alignment, block_size) == 0 )
     {
