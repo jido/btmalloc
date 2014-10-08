@@ -30,6 +30,8 @@ const int fixedsize_mask[slot_type_count] = {
     0x1,    0x3,    0xF,    0xF };
 const int fixedsize_test[slot_type_count] = {
     0x1,    0x2,    0x4,    0xC };
+const int fixedsize_shift[slot_type_count] = {
+    7,      1,      3,      3 };
 const int fixedsize_alignment[slot_type_count] = {
     1,      8,      4,      2 };
 const int fixedsize_block_size[slot_type_count] = {
@@ -103,6 +105,44 @@ extern int compare_and_set();
 
 
 /*
+   Memory hierarchy
+   
+   The zones of allocation are managed through a hierarchy of 
+   master allocation blocks.
+   
+   The structure of a master allocation block is:
+   
+   .-------------------------.
+   |                         |
+   |        data     .-------|
+   |                 | info  |
+   '-------------------------'
+   
+   The data block contains the addresses of child master 
+   blocks or of allocation zones.
+   
+   The info block contains a bitmap that indicates which of the
+   slots in the data block are in use. If the first slot is not 
+   in use then it cannot be filled, as well as all unused slots
+   that immediately follow it. It signals that these slots are
+   not managed by the memory allocator.
+   
+   The lowest bit of the bitmap is always 1.
+   
+   If the info block at the address pointed by the master
+   allocation block has 1 in the lowest bit, then it is a child
+   master block. If it has 0, then it is an allocation block
+   at the beginning of an allocation zone.
+   
+   A master allocation block is always followed by an allocation
+   zone. The address of this allocation zone is implicit and not 
+   listed in the data block.
+   
+   Two master allocation blocks cannot be contiguous in memory,
+   also the info block of the allocation block that follows a
+   master allocation block can have 0 or 1 in its lowest bit.
+*/
+/*
    Structure of an allocation block:
    
    .-------------------------.
@@ -111,8 +151,9 @@ extern int compare_and_set();
    |                 | info  |
    '-------------------------'
    
-   The data block contains either allocation memory or the size
-   of an allocation.
+   The data block contains either allocation memory (with
+   possibly more info blocks attached) or the address of an 
+   allocation.
    
    The lowest byte of the info block gives information about the
    organisation of the data:
@@ -167,8 +208,7 @@ extern int compare_and_set();
    
    The info block also contains a 62 bit bitmap indicating if
    each slot is free memory or not. The last slot is reserved
-   for the address of the next control block or the wilderness 
-   area.
+   for the end address of the allocation area.
       
    Each slot in the allocation block contains the address of
    allocation memory. This address is always 8-aligned.
@@ -239,17 +279,25 @@ extern int compare_and_set();
    available size a neighbouring free allocation slot is resized
    accordingly if there is one.
    
-   When an allocation block gets full, a new allocation block may
-   be created in the free space that follows to manage memory
-   allocation inside it. A predictor is used to estimate the free
-   space needs of an allocation block.
+   If no suitable slot is found in any allocation block, then a 
+   new allocation zone may be created and linked to a master 
+   allocation block. A variable size allocation block is added
+   at the beginning of the allocation zone.
    
-   Fixed size allocation blocks can be created in the free space
-   between the last area of used memory and the next allocation
-   block.
+   A predictor is used to estimate the free space needs of the 
+   allocation zone.
    
-   The last allocation block in memory is always a variable size
-   allocation block which manages the wilderness area.
+   When a fixed size allocation block has no free slot, a new 
+   fixed size allocation block may be created in the free space 
+   that follows to allocate small sizes of memory. If there is no 
+   free space (the next block is not empty) and a new fixed size 
+   allocation block is needed, then a master allocation block 
+   with free space following it is found or is created.
+   
+   A new fixed size allocation block can be created after another
+   fixed size allocation block or after a master allocation block
+   but not after a variable size allocation block. This ensures
+   that the lowest byte of the preceeding info block is not zero.
 */
 /*
    The predictor tries to guess what is the size most likely to
@@ -357,11 +405,7 @@ extern int compare_and_set();
    
    If the resize happens during allocation, then the next slot
    gets marked as used at the same time as the area of free
-   memory to resize. If the resize happens during creation of
-   a new allocation block, then an imaginary 63rd slot is
-   marked as used at the same time as the area of free memory
-   to resize. No other thread can create a new allocation
-   block if this imaginary slot is used.
+   memory to resize.
 */
 
 
@@ -500,9 +544,9 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
     {
         // On little endian, the 8-bit bitmap occupies the leftmost
         // slot; otherwise the rightmost
-        offset = fixedsize_block_size[0] - ( LITTLE_ENDIAN_CPU? 0: 1 );
+        offset = ( LITTLE_ENDIAN_CPU? 1: 0 );
     }
-    int shift = ((char*) bitmap + offset - (char*) allocated) / fixedsize_alignment[slot_type];
+    int shift = fixedsize_shift[slot_type] + ((char*) bitmap + offset - (char*) allocated) / fixedsize_alignment[slot_type];
     
     // Free memory
     if ( clear_bit(bitmap, shift) )
