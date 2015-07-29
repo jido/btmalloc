@@ -11,9 +11,9 @@ typedef volatile aligned_uint volatile_aligned_uint;
 typedef volatile_aligned_uint *v_aligned_uint_ptr;
 
 #define alignment (sizeof(aligned_uint))
-const int rightmost = alignment - 1;
-const int uchar_bits = 8;
-const int uchar_mask = UINT8_MAX;
+static const int rightmost = alignment - 1;
+static const int uchar_bits = 8;
+static const int uchar_mask = UINT8_MAX;
 
 typedef union
 {
@@ -21,20 +21,20 @@ typedef union
    uchar byte[alignment];
 } control;
 
-const int block_size = 512;
-const int block_alignment = 512;        // should be a multiple of block_size
+static const int block_size = 512;
+static const int block_alignment = 512;        // should be a multiple of block_size
 
 #define slot_type_count 4
-const int biggest_slot = 1;
-const int fixedsize_mask[slot_type_count] = {
+static const int biggest_slot = 1;
+static const int fixedsize_mask[slot_type_count] = {
     0x1,    0x3,    0xF,    0xF };
-const int fixedsize_test[slot_type_count] = {
+static const int fixedsize_test[slot_type_count] = {
     0x1,    0x2,    0x4,    0xC };
-const int fixedsize_shift[slot_type_count] = {
+static const int fixedsize_shift[slot_type_count] = {
     7,      1,      3,      3 };
-const int fixedsize_alignment[slot_type_count] = {
+static const int fixedsize_alignment[slot_type_count] = {
     1,      8,      4,      2 };
-const int fixedsize_block_size[slot_type_count] = {
+static const int fixedsize_block_size[slot_type_count] = {
     8,      504,    248,    128 };
 
 #ifndef MAX_HOARD
@@ -61,8 +61,8 @@ extern int mutex_unlock(mutex*);
 extern int mutex_destroy(mutex*);       // returns non-zero if mutex locked
 #endif
 
-void *heap_start = NULL;
-mutex heap_init_lock;
+static void *heap_start = NULL;
+static mutex heap_init_lock;
 
 typedef struct cached_block
 {
@@ -75,20 +75,20 @@ __thread int cache_misses = 0;
 
 #define predictor_size 12          // should be at least slot_size_count + predictor_fuzz + 2
 #define predictor_fuzz 4
-const int p_fuzz_left = (predictor_fuzz - 1) / 2;
+static const int p_fuzz_left = (predictor_fuzz - 1) / 2;
 
-const uint32_t p_compress_threshold = 1000;
+static const uint32_t p_compress_threshold = 1000;
 
 __thread size_t predictor[predictor_size] = {1, 2, 4, 8};
 __thread int median;
 __thread uint32_t p_count[predictor_size + 1];  // include a sentinel
 __thread uint32_t p_total = 0;
 
-union
+static const union
 {
    uint32_t number;
    uint8_t byte[4];             // guaranteed to be aligned with number
-} const endianness_test = {1};
+} endianness_test = {1};
 
 #define BIG_ENDIAN_CPU (endianness_test.byte[3])
 #define LITTLE_ENDIAN_CPU (endianness_test.byte[0])
@@ -591,7 +591,6 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
     }
 }
 
-
 int main(int n, char* args[])
 {
     printf("CPU type: %s endian\n", LITTLE_ENDIAN_CPU? "little": "big");
@@ -603,8 +602,8 @@ int main(int n, char* args[])
         block[--index] = 1;
         block[--index] = bitmap;
         free_fixed_size_memory((char*) (block + index) + 4, block);
-        printf("bitmap before free = %lX\n", bitmap);
-        printf("bitmap after free = %lX\n", block[index]);
+        printf("bitmap before free = %llX\n", bitmap);
+        printf("bitmap after free = %llX\n", block[index]);
     }
     return 0;
 }
