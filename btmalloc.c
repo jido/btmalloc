@@ -429,13 +429,13 @@ aligned_uint *allocation_block(const void *const allocated)
     else
     {
         // The info block indicates the address of the allocation block
-        assert( info < (uintptr_t) boundary );
+        assert( info < (uintptr_t) boundary && info > (uintptr_t) heap_start );
         return (aligned_uint*) info;
     }
 }
 
 // Identify the slot size from the bitmap
-int bitmap_slot_type(aligned_uint b)
+static int bitmap_slot_type(aligned_uint b)
 {
     assert( b != 0 );
     
@@ -452,7 +452,7 @@ int bitmap_slot_type(aligned_uint b)
 
 // Locate the bitmap of a fixed-size block corresponding to
 // the specified memory slot
-aligned_uint *fixedsize_block(const void *const allocated)
+static aligned_uint *fixedsize_block(const void *const allocated)
 {
     aligned_uint *const block = (aligned_uint*) ((uintptr_t) allocated & ~((uintptr_t) block_size - 1));
     
@@ -487,7 +487,7 @@ aligned_uint *fixedsize_block(const void *const allocated)
 }
 
 // Clear the specified allocation bit in bitmap
-int clear_bit(v_aligned_uint_ptr bitmap, int shift)
+static int clear_bit(v_aligned_uint_ptr bitmap, int shift)
 {
     aligned_uint b = *bitmap;
     aligned_uint freed = b & ~(((aligned_uint) 1) << shift);
@@ -496,7 +496,7 @@ int clear_bit(v_aligned_uint_ptr bitmap, int shift)
 }
 
 // Try hoarding freed memory for reuse
-int hoard_freed(size_t size, void *const memory)
+static int hoard_freed(size_t size, void *const memory)
 {
     // If the slot is large enough for a pointer and we are
     // not going over the quota then we can hoard
@@ -517,7 +517,7 @@ int hoard_freed(size_t size, void *const memory)
 }
 
 // Take out the selected slot from the freed list
-void *unhoard(void **next)
+static void *unhoard(void **next)
 {
     void *memory = *next;
     assert( memory != NULL );
@@ -526,7 +526,7 @@ void *unhoard(void **next)
 }
 
 // Calculate the shift of the corresponding bit in the bitmap
-int get_shift(void *const address, void *const bitmap, int slot_type)
+static int get_shift(void *const address, void *const bitmap, int slot_type)
 {
     int slot_size = alignment;
     int offset = 0;
@@ -548,7 +548,7 @@ int get_shift(void *const address, void *const bitmap, int slot_type)
 }
 
 // Free a slot in a fixed-size memory allocation block
-void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
+static void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
 {
     assert( ((uintptr_t) block) % block_size == 0 );
     
