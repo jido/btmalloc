@@ -24,12 +24,14 @@ typedef union
 const int block_size = 512;
 const int block_alignment = 512;        // should be a multiple of block_size
 
-const int slot_type_count = 4;
+#define slot_type_count 4
 const int biggest_slot = 1;
 const int fixedsize_mask[slot_type_count] = {
     0x1,    0x3,    0xF,    0xF };
 const int fixedsize_test[slot_type_count] = {
     0x1,    0x2,    0x4,    0xC };
+const int fixedsize_shift[slot_type_count] = {
+    7,      1,      3,      3 };
 const int fixedsize_alignment[slot_type_count] = {
     1,      8,      4,      2 };
 const int fixedsize_block_size[slot_type_count] = {
@@ -71,8 +73,8 @@ __thread cached_block *cache = NULL;
 __thread int cache_misses = 0;
 
 
-const int predictor_size = 12;          // should be at least slot_size_count + predictor_fuzz + 2
-const int predictor_fuzz = 4;
+#define predictor_size 12          // should be at least slot_size_count + predictor_fuzz + 2
+#define predictor_fuzz 4
 const int p_fuzz_left = (predictor_fuzz - 1) / 2;
 
 const uint32_t p_compress_threshold = 1000;
@@ -103,6 +105,44 @@ extern int compare_and_set();
 
 
 /*
+   Memory hierarchy
+   
+   The zones of allocation are managed through a hierarchy of 
+   master allocation blocks.
+   
+   The structure of a master allocation block is:
+   
+   .-------------------------.
+   |                         |
+   |        data     .-------|
+   |                 | info  |
+   '-------------------------'
+   
+   The data block contains the addresses of child master 
+   blocks or of allocation zones.
+   
+   The info block contains a bitmap that indicates which of the
+   slots in the data block are in use. If the first slot is not 
+   in use then it cannot be filled, as well as all unused slots
+   that immediately follow it. It signals that these slots are
+   not managed by the memory allocator.
+   
+   The lowest bit of the bitmap is always 1.
+   
+   If the info block at the address pointed by the master
+   allocation block has 1 in the lowest bit, then it is a child
+   master block. If it has 0, then it is an allocation block
+   at the beginning of an allocation zone.
+   
+   A master allocation block is always followed by an allocation
+   zone. The address of this allocation zone is implicit and not 
+   listed in the data block.
+   
+   Two master allocation blocks cannot be contiguous in memory,
+   also the info block of the allocation block that follows a
+   master allocation block can have 0 or 1 in its lowest bit.
+*/
+/*
    Structure of an allocation block:
    
    .-------------------------.
@@ -111,8 +151,9 @@ extern int compare_and_set();
    |                 | info  |
    '-------------------------'
    
-   The data block contains either allocation memory or the size
-   of an allocation.
+   The data block contains either allocation memory (with
+   possibly more info blocks attached) or the address of an 
+   allocation.
    
    The lowest byte of the info block gives information about the
    organisation of the data:
@@ -167,33 +208,10 @@ extern int compare_and_set();
    
    The info block also contains a 62 bit bitmap indicating if
    each slot is free memory or not. The last slot is reserved
-   for the address of the next control block or the wilderness 
-   area.
-   
-   The organisation of each slot is given by its rightmost byte
-   as follows:
-   
-   .----------------------------.-------------------------------.
-   |  Rightmost byte            |  Slot contents                |
-   |----------------------------|-------------------------------|
-   |        .....001            |     1B 8-aligned memory       |
-   |        .....010            |     2B 8-aligned memory       |
-   |        .....011            |     3B 8-aligned memory       |
-               .                               .
-               .                               .
-               .                               .
-   |        .....111            |     7B 8-aligned memory       |
-   |        .....000            |     memory address            |
-   '------------------------------------------------------------'
-   
-   For sizes up to seven bytes, the memory is allocated
-   directly in the slot.
-   
-   For sizes of eight bytes or more, the slot contains the
-   address of allocation memory. It is rounded up by 8 so that
-   it always ends with 000. On little endian processors, the
-   address is rotated left so that the least significant byte
-   always occupies the rightmost position.
+   for the end address of the allocation area.
+      
+   Each slot in the allocation block contains the address of
+   allocation memory. This address is always 8-aligned.
    
    Areas of allocation memory are contiguous. The size of an
    area of allocation memory can be computed by taking the
@@ -261,17 +279,25 @@ extern int compare_and_set();
    available size a neighbouring free allocation slot is resized
    accordingly if there is one.
    
-   When an allocation block gets full, a new allocation block may
-   be created in the free space that follows to manage memory
-   allocation inside it. A predictor is used to estimate the free
-   space needs of an allocation block.
+   If no suitable slot is found in any allocation block, then a 
+   new allocation zone may be created and linked to a master 
+   allocation block. A variable size allocation block is added
+   at the beginning of the allocation zone.
    
-   Fixed size allocation blocks can be created in the free space
-   between the last area of used memory and the next allocation
-   block.
+   A predictor is used to estimate the free space needs of the 
+   allocation zone.
    
-   The last allocation block in memory is always a variable size
-   allocation block which manages the wilderness area.
+   When a fixed size allocation block has no free slot, a new 
+   fixed size allocation block may be created in the free space 
+   that follows to allocate small sizes of memory. If there is no 
+   free space (the next block is not empty) and a new fixed size 
+   allocation block is needed, then a master allocation block 
+   with free space following it is found or is created.
+   
+   A new fixed size allocation block can be created after another
+   fixed size allocation block or after a master allocation block
+   but not after a variable size allocation block. This ensures
+   that the lowest byte of the preceeding info block is not zero.
 */
 /*
    The predictor tries to guess what is the size most likely to
@@ -379,58 +405,9 @@ extern int compare_and_set();
    
    If the resize happens during allocation, then the next slot
    gets marked as used at the same time as the area of free
-   memory to resize. If the resize happens during creation of
-   a new allocation block, then an imaginary 63rd slot is
-   marked as used at the same time as the area of free memory
-   to resize. No other thread can create a new allocation
-   block if this imaginary slot is used.
+   memory to resize.
 */
 
-
-/*
-   Bit fiddling functions for the address of an allocation
-   area
-*/
-
-// Quickly rotate the value least significant byte (LSB) so
-// that the destination ends with 000
-void rotate(aligned_uint value, control *const destination)
-{
-    assert( value / alignment * alignment == value );
-    
-    if ( BIG_ENDIAN_CPU || sizeof (void*) < alignment )
-    {
-        // The LSB is already in rightmost position if the CPU
-        // is big endian. If the CPU is little endian but
-        // addresses are less than 64 bits, the most signifi-
-        // cant byte (MSB) is always 0 so no need to rotate.
-        destination->info = value;
-        
-        assert( BIG_ENDIAN_CPU || destination->byte[rightmost] == 0 );
-    }
-    else
-    {
-        assert( LITTLE_ENDIAN_CPU );
-        
-        destination->info = value >> uchar_bits;
-        destination->byte[rightmost] = (uchar) value;
-    }
-}
-
-// Rotate in reverse direction to move the LSB back to its
-// place so the address can be used
-aligned_uint unrotate(const control *const value)
-{
-    if ( BIG_ENDIAN_CPU || sizeof (void*) < alignment )
-    {
-        // Value is not rotated
-        return value->info;
-    }
-    assert( LITTLE_ENDIAN_CPU );
-        
-    // Rotate backwards
-    return (value->info << uchar_bits) | value->byte[rightmost];
-}
 
 
 /*
@@ -441,7 +418,7 @@ aligned_uint unrotate(const control *const value)
 aligned_uint *allocation_block(const void *const allocated)
 {
     // Check the info block which precedes the 512-bytes block boundary
-    aligned_uint *boundary = (aligned_uint*) ((uintptr_t) allocated & ~(block_size - 1));
+    aligned_uint *boundary = (aligned_uint*) ((uintptr_t) allocated & ~((uintptr_t) block_size - 1));
     aligned_uint info = *(boundary - 1);
     
     if ( info & uchar_mask )
@@ -477,7 +454,7 @@ int bitmap_slot_type(aligned_uint b)
 // the specified memory slot
 aligned_uint *fixedsize_block(const void *const allocated)
 {
-    aligned_uint *const block = (aligned_uint*) ((uintptr_t) allocated & ~(block_size - 1));
+    aligned_uint *const block = (aligned_uint*) ((uintptr_t) allocated & ~((uintptr_t) block_size - 1));
     
     // Address of bitmap
     aligned_uint *bitmap = block + (block_size / alignment - 1);
@@ -492,7 +469,7 @@ aligned_uint *fixedsize_block(const void *const allocated)
         assert( slot_type != -1 );
         
         // Calculate the address of the next bitmap (or info block)
-        next = (aligned_uint*) ((void*) bitmap - fixedsize_block_size[slot_type]);
+        next = (aligned_uint*) ((char*) bitmap - fixedsize_block_size[slot_type]);
         // The start of the current block should be within the
         // allocation block
         assert( next + 1 >= block );
@@ -513,7 +490,7 @@ aligned_uint *fixedsize_block(const void *const allocated)
 int clear_bit(v_aligned_uint_ptr bitmap, int shift)
 {
     aligned_uint b = *bitmap;
-    aligned_uint freed = b & ~(1 << shift);
+    aligned_uint freed = b & ~(((aligned_uint) 1) << shift);
     assert( freed != b );   // No other thread should clear the bit
     return compare_and_set(bitmap, b, freed);
 }
@@ -555,8 +532,11 @@ int get_shift(void *const address, void *const bitmap, int slot_type)
     int offset = 0;
     if ( slot_type != -1 )
     {
+        assert( slot_type >= 0 && slot_type < slot_type_count );
+
         // Fixed-size allocation block
         slot_size = fixedsize_alignment[slot_type];
+
         if ( slot_type == 0 )
         {
             // On little endian, the 8-bit bitmap occupies the leftmost
@@ -614,22 +594,17 @@ void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
 
 int main(int n, char* args[])
 {
-    aligned_uint a = 0x123456789ABCDEF0L;
-    control b = {0xDABADABADABADABAL};
     printf("CPU type: %s endian\n", LITTLE_ENDIAN_CPU? "little": "big");
-    printf("a=%llx, b=%llx\n", a, b.info);
-    rotate(a, &b);
-    printf("b'=%llx, a'=%llx\n", b.info, unrotate(&b));
     aligned_uint *block;
     if ( posix_memalign((void**) &block, block_alignment, block_size) == 0 )
     {
         int index = block_size / alignment;
-        int bitmap = 0x19;      // 00011001
+        aligned_uint bitmap = 0x19;      // 00011001
         block[--index] = 1;
         block[--index] = bitmap;
         free_fixed_size_memory((char*) (block + index) + 4, block);
-        printf("bitmap before free = %X\n", bitmap);
-        printf("bitmap after free = %X\n", (int) block[index]);
+        printf("bitmap before free = %lX\n", bitmap);
+        printf("bitmap after free = %lX\n", block[index]);
     }
     return 0;
 }
