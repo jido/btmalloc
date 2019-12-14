@@ -429,7 +429,7 @@ aligned_uint *allocation_block(const void *const allocated)
     else
     {
         // The info block indicates the address of the allocation block
-        assert( info < (uintptr_t) boundary && info > (uintptr_t) heap_start );
+        assert( info < (uintptr_t) boundary && info >= (uintptr_t) heap_start );
         return (aligned_uint*) info;
     }
 }
@@ -537,7 +537,7 @@ static int get_shift(void *const address, void *const bitmap, int slot_type)
         // Fixed-size allocation block
         slot_size = fixedsize_alignment[slot_type];
 
-        if ( slot_type == 0 )
+        if ( slot_size == 1 )
         {
             // On little endian, the 8-bit bitmap occupies the leftmost
             // slot; otherwise the rightmost
