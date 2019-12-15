@@ -629,22 +629,20 @@ int update_predictor(size_t alloc_size)
     assert( n >= 0 );
     if ( alloc_size != predictor[n] && n >= slot_type_count && fuzz_zone(n) ) {
         // New alloc size in the fuzz zone, insert it
-        size_t minimum = p_total;
-        int index, index_min = slot_type_count;
-        for ( index = index_min; p_count[index] != 0; ++index ) {
-            if ( p_count[index] <= minimum ) {
-                minimum = p_count[index];
-                index_min = index;
-            }
+        int count, index;
+        for ( count = slot_type_count; p_count[count] != 0; ++count ) {
+            assert( count < predictor_size );
         }
-        if ( fuzz_zone(index_min) && index == predictor_size ) {
-            // Cannot remove an alloc size within the fuzz zone, select one outside
-            for ( index_min = slot_type_count; fuzz_zone(index_min); ++index_min ) {
-                assert( index_min < predictor_size );
+        if ( count == predictor_size ) {
+            // There is no slot left, need to free one - preferably the one with minimum count
+            size_t minimum = p_total;
+            int index_min = slot_type_count;
+            for ( int index = slot_type_count; index < predictor_size; ++index ) {
+                if ( !fuzz_zone(index) && p_count[index] <= minimum ) { // cannot remove a slot within the fuzz zone
+                    minimum = p_count[index];
+                    index_min = index;
+                }
             }
-        }
-        if ( index == predictor_size ) {
-            // There is no slot left, need to free one
             if ( index_min == predictor_size - 1 ) {
                 // Preserve the last slot
                 --index_min;
@@ -652,6 +650,10 @@ int update_predictor(size_t alloc_size)
             p_count[index_min + 1] += p_count[index_min];
             index = index_min;
         }
+        else {
+            index = count;
+        }
+        // Shift slots to make space for the new alloc size
         assert( index >= slot_type_count && index < predictor_size );
         if ( index < n ) {
             --n;
