@@ -84,93 +84,6 @@ __thread int median = slot_type_count;
 __thread uint32_t p_count[predictor_size + 1] = {0};  // include a sentinel
 __thread uint32_t p_total = 0;
 
-int increase_predictor_count(int index) {
-    assert( index >= 0 && index < predictor_size );
-    ++p_count[index];
-    ++p_total;
-    if ( p_total > p_compress_threshold ) {
-        p_total = 0;
-        for ( int n = 0; n < slot_type_count || p_count[n] != 0; ++n ) {
-            // halve the value, rounded up so that half 1 is not 0
-            int half = (p_count[n] + 1) / 2;
-            p_count[n] = half;
-            p_total += half;
-        }
-    }
-    size_t sum = 0;
-    for ( int n = 0; sum <= p_total / 2; ++n ) {
-        sum += p_count[n];
-        median = n;
-    }
-    return median;
-}
-
-int fuzz_zone(int index)
-{
-    int zleft = median - p_fuzz_left;
-    return index >= zleft && index < zleft + predictor_fuzz;
-}
-
-int update_predictor(size_t alloc_size)
-{
-    int n = 0;
-    while ( (n < slot_type_count || p_count[n] != 0) && alloc_size > predictor[n] ) {
-        ++n; 
-    }
-    assert (n >= 0);
-    if ( alloc_size != predictor[n] && n >= slot_type_count && fuzz_zone(n) ) {
-        // new alloc size in the fuzz zone, insert it
-        size_t minimum = p_total;
-        int index, index_min = slot_type_count;
-        for ( index = index_min; p_count[index] != 0; ++index ) {
-            if ( p_count[index] <= minimum ) {
-                minimum = p_count[index];
-                index_min = index;
-            }
-        }
-        if ( fuzz_zone(index_min) && index == predictor_size ) {
-            // cannot remove an alloc size within the fuzz zone, select one outside
-            for ( index_min = slot_type_count; fuzz_zone(index_min); ++index_min ) {
-                assert( index_min < predictor_size );
-            }
-        }
-        if ( index == predictor_size ) {
-            // there is no slot left, need to free one
-            if ( index_min == predictor_size - 1 ) {
-                // preserve the last slot
-                --index_min;
-            }
-            p_count[index_min + 1] += p_count[index_min];
-            index = index_min;
-        }
-        assert( index >= slot_type_count && index < predictor_size );
-        if ( index < n ) {
-            --n;
-            for ( int i = index; i < n; ++i ) {
-                predictor[i] = predictor[i + 1];
-                p_count[i] = p_count[i + 1];
-            }
-        }
-        else {
-            for ( int i = index - 1; i >= n; --i ) {
-                predictor[i + 1] = predictor[i];
-                p_count[i + 1] = p_count[i];
-            }
-        }
-        predictor[n] = alloc_size;
-        p_count[n] = 0;
-    }
-    else if ( n >= slot_type_count && p_count[n] == 0 ) {
-        // alloc size larger than largest predictor alloc size
-        if ( n == predictor_size ) {
-            // all the slots are taken, update largest alloc size
-            --n;
-        }
-        predictor[n] = alloc_size;
-    }
-    return increase_predictor_count(n);
-}
-
 static const union
 {
    uint32_t number;
@@ -676,6 +589,95 @@ static void free_fixed_size_memory(void *const allocated, aligned_uint *const bl
             }
         } while (1);
     }
+}
+
+int increase_predictor_count(int index) {
+    assert( index >= 0 && index < predictor_size );
+    ++p_count[index];
+    ++p_total;
+    if ( p_total > p_compress_threshold ) {
+        p_total = 0;
+        for ( int n = 0; n < slot_type_count || p_count[n] != 0; ++n ) {
+            // Halve the value, rounded up so that half 1 is not 0
+            int half = (p_count[n] + 1) / 2;
+            p_count[n] = half;
+            p_total += half;
+        }
+    }
+    // Calculate new median
+    size_t sum = 0;
+    for ( int n = 0; sum <= p_total / 2; ++n ) {
+        assert( n < predictor_size );
+        sum += p_count[n];
+        median = n;
+    }
+    return median;
+}
+
+int fuzz_zone(int index)
+{
+    int zleft = median - p_fuzz_left;
+    return index >= zleft && index < zleft + predictor_fuzz;
+}
+
+int update_predictor(size_t alloc_size)
+{
+    int n = 0;
+    while ( (n < slot_type_count || p_count[n] != 0) && alloc_size > predictor[n] ) {
+        ++n; 
+    }
+    assert( n >= 0 );
+    if ( alloc_size != predictor[n] && n >= slot_type_count && fuzz_zone(n) ) {
+        // New alloc size in the fuzz zone, insert it
+        size_t minimum = p_total;
+        int index, index_min = slot_type_count;
+        for ( index = index_min; p_count[index] != 0; ++index ) {
+            if ( p_count[index] <= minimum ) {
+                minimum = p_count[index];
+                index_min = index;
+            }
+        }
+        if ( fuzz_zone(index_min) && index == predictor_size ) {
+            // Cannot remove an alloc size within the fuzz zone, select one outside
+            for ( index_min = slot_type_count; fuzz_zone(index_min); ++index_min ) {
+                assert( index_min < predictor_size );
+            }
+        }
+        if ( index == predictor_size ) {
+            // There is no slot left, need to free one
+            if ( index_min == predictor_size - 1 ) {
+                // Preserve the last slot
+                --index_min;
+            }
+            p_count[index_min + 1] += p_count[index_min];
+            index = index_min;
+        }
+        assert( index >= slot_type_count && index < predictor_size );
+        if ( index < n ) {
+            --n;
+            for ( int i = index; i < n; ++i ) {
+                predictor[i] = predictor[i + 1];
+                p_count[i] = p_count[i + 1];
+            }
+        }
+        else {
+            for ( int i = index; i > n; --i ) {
+                predictor[i] = predictor[i - 1];
+                p_count[i] = p_count[i - 1];
+            }
+        }
+        predictor[n] = alloc_size;
+        p_count[n] = 0;
+    }
+    else if ( n >= slot_type_count && p_count[n] == 0 ) {
+        // Alloc size larger than largest predictor alloc size
+        if ( n == predictor_size ) {
+            // All the slots are taken, update largest alloc size
+            --n;
+        }
+        predictor[n] = alloc_size;
+    }
+    return increase_predictor_count(n);
 }
 
 int main(int n, char* args[])
