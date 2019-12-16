@@ -633,6 +633,7 @@ int update_predictor(size_t alloc_size)
         for ( count = slot_type_count; p_count[count] != 0; ++count ) {
             assert( count < predictor_size );
         }
+        int reset = 1;
         if ( count == predictor_size ) {
             // There is no slot left, need to free one - preferably the one with minimum count
             size_t minimum = p_total;
@@ -647,7 +648,14 @@ int update_predictor(size_t alloc_size)
                 // Preserve the last slot
                 --index_min;
             }
-            p_count[index_min + 1] += p_count[index_min];
+            if ( index_min == n - 1 ) {
+                // New alloc size will take that slot so preserve its count
+                reset = 0;
+            }
+            else {
+                // Combine the counts since the minimum count slot is being freed
+                p_count[index_min + 1] += p_count[index_min];
+            }
             index = index_min;
         }
         else {
@@ -669,7 +677,9 @@ int update_predictor(size_t alloc_size)
             }
         }
         predictor[n] = alloc_size;
-        p_count[n] = 0;
+        if ( reset ) {
+            p_count[n] = 0;
+        }
     }
     else if ( n >= slot_type_count && p_count[n] == 0 ) {
         // Alloc size larger than largest predictor alloc size
@@ -684,7 +694,8 @@ int update_predictor(size_t alloc_size)
 
 int main(int n, char* args[])
 {
-    size_t sizes[] = {2, 2, 2, 400, 8, 64, 504, 1, 64, 200, 320, 400, 800, 3, 184, 640, 208, 720, 48, 24, 8, 56, 72, 600, 192, 112};
+    size_t sizes[] = {400, 8, 64, 504, 1, 64, 200, 320, 1000, 800, 3, 184, 640, 208, 720, 480, 240, 800, 560, 720, 1000, 192, 112,
+        1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 6000, 400};
     for ( int i = 0; i < sizeof(sizes) / sizeof(size_t); ++i ) {
         printf("Alloc %lu - new median: %lu, predictor =", sizes[i], predictor[update_predictor(sizes[i])]);
         for ( int n = 0; n < slot_type_count || p_count[n] > 0; ++n ) {
