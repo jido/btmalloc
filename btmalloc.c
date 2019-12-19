@@ -523,7 +523,7 @@ size_t free_internal(void *const memory, int fail_early)
 }
 
 // Try hoarding freed memory for reuse
-static int hoard_freed(size_t size, void *const memory)
+int hoard_freed(size_t size, void *const memory)
 {
     // If the slot is large enough for a pointer and we are
     // not going over the quota then we can hoard
@@ -646,13 +646,16 @@ static size_t free_fixed_size_memory(void *const allocated, aligned_uint *const 
     }
 }
 
-int increase_predictor_count(int index) {
+static int increase_predictor_count(int index)
+{
     assert( index >= 0 && index < predictor_size );
     ++p_count[index];
     ++p_total;
-    if ( p_total > p_compress_threshold ) {
+    if ( p_total > p_compress_threshold )
+    {
         p_total = 0;
-        for ( int n = 0; n < slot_type_count || p_count[n] != 0; ++n ) {
+        for ( int n = 0; n < slot_type_count || p_count[n] != 0; ++n )
+        {
             // Halve the value, rounded up so that half 1 is not 0
             int half = (p_count[n] + 1) / 2;
             p_count[n] = half;
@@ -661,7 +664,8 @@ int increase_predictor_count(int index) {
     }
     // Calculate new median
     size_t sum = 0;
-    for ( int n = 0; sum <= p_total / 2; ++n ) {
+    for ( int n = 0; sum <= p_total / 2; ++n )
+    {
         assert( n < predictor_size );
         sum += p_count[n];
         median = n;
@@ -669,7 +673,7 @@ int increase_predictor_count(int index) {
     return median;
 }
 
-int fuzz_zone(int index)
+static int fuzz_zone(int index)
 {
     int zleft = median - p_fuzz_left;
     return index >= zleft && index < zleft + predictor_fuzz;
@@ -678,67 +682,84 @@ int fuzz_zone(int index)
 int update_predictor(size_t alloc_size)
 {
     int n = 0;
-    while ( (n < slot_type_count || p_count[n] != 0) && alloc_size > predictor[n] ) {
+    while ( (n < slot_type_count || p_count[n] != 0) && alloc_size > predictor[n] )
+    {
         ++n; 
     }
     assert( n >= 0 );
-    if ( alloc_size != predictor[n] && n >= slot_type_count && fuzz_zone(n) ) {
+    if ( alloc_size != predictor[n] && n >= slot_type_count && fuzz_zone(n) )
+    {
         // New alloc size in the fuzz zone, insert it
         int count, index;
-        for ( count = slot_type_count; p_count[count] != 0; ++count ) {
+        for ( count = slot_type_count; p_count[count] != 0; ++count )
+        {
             assert( count < predictor_size );
         }
         int reset = 1;
-        if ( count == predictor_size ) {
+        if ( count == predictor_size )
+        {
             // There is no slot left, need to free one - preferably the one with minimum count
             size_t minimum = p_total;
             int index_min = slot_type_count;
-            for ( int index = slot_type_count; index < predictor_size; ++index ) {
-                if ( !fuzz_zone(index) && p_count[index] <= minimum ) { // cannot remove a slot within the fuzz zone
+            for ( int index = slot_type_count; index < predictor_size; ++index )
+            {
+                if ( !fuzz_zone(index) && p_count[index] <= minimum )   // cannot remove a slot within the fuzz zone
+                {
                     minimum = p_count[index];
                     index_min = index;
                 }
             }
-            if ( index_min == predictor_size - 1 ) {
+            if ( index_min == predictor_size - 1 )
+            {
                 // Preserve the last slot
                 --index_min;
             }
-            if ( index_min == n - 1 ) {
+            if ( index_min == n - 1 )
+            {
                 // New alloc size will take that slot so preserve its count
                 reset = 0;
             }
-            else {
+            else
+            {
                 // Combine the counts since the minimum count slot is being freed
                 p_count[index_min + 1] += p_count[index_min];
             }
             index = index_min;
         }
-        else {
+        else
+        {
             index = count;
         }
         // Shift slots to make space for the new alloc size
         assert( index >= slot_type_count && index < predictor_size );
-        if ( index < n ) {
+        if ( index < n )
+        {
             --n;
-            for ( int i = index; i < n; ++i ) {
+            for ( int i = index; i < n; ++i )
+            {
                 predictor[i] = predictor[i + 1];
                 p_count[i] = p_count[i + 1];
             }
         }
-        else {
-            for ( int i = index; i > n; --i ) {
+        else
+        {
+            for ( int i = index; i > n; --i )
+            {
                 predictor[i] = predictor[i - 1];
                 p_count[i] = p_count[i - 1];
             }
         }
         predictor[n] = alloc_size;
-        if ( reset ) {
+        if ( reset )
+        {
             p_count[n] = 0;
         }
     }
-    else if ( n >= slot_type_count && p_count[n] == 0 ) {
+    else if ( n >= slot_type_count && p_count[n] == 0 )
+    {
         // Alloc size larger than largest predictor alloc size
-        if ( n == predictor_size ) {
+        if ( n == predictor_size )
+        {
             // All the slots are taken, update largest alloc size
             --n;
         }
@@ -751,9 +772,11 @@ int main(int n, char* args[])
 {
     size_t sizes[] = {400, 8, 64, 504, 1, 64, 200, 320, 1000, 800, 3, 184, 640, 208, 720, 480, 240, 800, 560, 720, 1000, 192, 112,
         1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 6000, 400};
-    for ( int i = 0; i < sizeof(sizes) / sizeof(size_t); ++i ) {
+    for ( int i = 0; i < sizeof(sizes) / sizeof(size_t); ++i )
+    {
         printf("Alloc %lu - new median: %lu, predictor =", sizes[i], predictor[update_predictor(sizes[i])]);
-        for ( int n = 0; n < slot_type_count || p_count[n] > 0; ++n ) {
+        for ( int n = 0; n < slot_type_count || p_count[n] > 0; ++n )
+        {
             printf(" (%lu: %u)", predictor[n], p_count[n]);
         }
         puts("");
