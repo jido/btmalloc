@@ -495,27 +495,6 @@ static int clear_bit(v_aligned_uint_ptr bitmap, int shift)
     return compare_and_set(bitmap, b, freed);
 }
 
-// Try hoarding freed memory for reuse
-static int hoard_freed(size_t size, void *const memory)
-{
-    // If the slot is large enough for a pointer and we are
-    // not going over the quota then we can hoard
-    if ( size < sizeof (void*) || hoard_size + size > MAX_HOARD )
-    {
-        // Not enough space in slot or in hoard
-        return 0;
-    }
-    else
-    {
-        // Insert as head of freed memory hoarding list
-        void **current = freed_list;
-        freed_list = memory;
-        *(void**) memory = current;
-        hoard_size += size;
-        return 1;
-    }
-}
-
 // Take out the selected slot from the freed list
 static void *unhoard(void **next)
 {
@@ -523,6 +502,77 @@ static void *unhoard(void **next)
     assert( memory != NULL );
     *next = *(void**) memory;        // replace pointed value
     return memory;
+}
+
+static size_t free_fixed_size_memory(void *const allocated, aligned_uint *const block, int fail_early);
+
+size_t free_internal(void *const memory, int fail_early)
+{
+    aligned_uint *block = allocation_block(memory);
+    aligned_uint info = *(block - 1);
+    if ( info & uchar_mask )
+    {
+        return free_fixed_size_memory(memory, block, fail_early);
+    }
+    else
+    {
+        // TODO - implement this otherwise there is infinite loop
+        assert ( fail_early );
+        return 0;
+    }
+}
+
+// Try hoarding freed memory for reuse
+static int hoard_freed(size_t size, void *const memory)
+{
+    // If the slot is large enough for a pointer and we are
+    // not going over the quota then we can hoard
+    if ( size < sizeof (void*) || size > MAX_HOARD )
+    {
+        // Not enough space in slot or in hoard
+        return 0;
+    }
+    while ( hoard_size + size > MAX_HOARD )
+    {
+        // Try freeing hoarded memory until hoarding this doesn't exceed maximum
+        void **pred = freed_list;
+        void **tail = *pred;
+        
+        assert ( tail != NULL );
+        if ( tail == NULL )
+        {
+            // Something went wrong, silently fix
+            hoard_size = 0;
+            break;
+        }
+        // Find oldest hoarded memory (tail of the list)
+        while ( *tail != NULL )
+        {
+            pred = tail;
+            tail = *pred;
+        }
+        size_t freed = free_internal(tail, 1);   // fail if there is a concurrent update
+        if ( freed == 0 )
+        {
+            // Failed, move tail to head of freed list
+            unhoard(pred);
+            *tail = freed_list;
+            freed_list = tail;
+        }
+        else
+        {
+            // Remove tail from freed list 
+            *pred = NULL;
+            hoard_size -= freed;
+        }
+    }
+    
+    // Insert as head of freed memory hoarding list
+    void **current = freed_list;
+    freed_list = memory;
+    *(void**) memory = current;
+    hoard_size += size;
+    return 1;
 }
 
 // Calculate the shift of the corresponding bit in the bitmap
@@ -548,7 +598,7 @@ static int get_shift(void *const address, void *const bitmap, int slot_type)
 }
 
 // Free a slot in a fixed-size memory allocation block
-static void free_fixed_size_memory(void *const allocated, aligned_uint *const block)
+static size_t free_fixed_size_memory(void *const allocated, aligned_uint *const block, int fail_early)
 {
     assert( ((uintptr_t) block) % block_size == 0 );
     
@@ -564,20 +614,25 @@ static void free_fixed_size_memory(void *const allocated, aligned_uint *const bl
     int shift = get_shift(allocated, (void*) bitmap, slot_type);
     
     // Free memory
+    int freed_size = fixedsize_alignment[slot_type];
     if ( clear_bit(bitmap, shift) )
     {
         // Success!
-        return;
+        return freed_size;
     }
     else
     {
         // Failed - the bitmap was updated concurrently
+        if ( fail_early )
+        {
+            return 0;
+        }
 
         // Let's try hoarding
-        if ( hoard_freed(fixedsize_alignment[slot_type], allocated) )
+        if ( hoard_freed(freed_size, allocated) )
         {
             // It worked!
-            return;
+            return freed_size;
         }
 
         // Won't hoard, try harder to free memory (busy loop)
@@ -585,7 +640,7 @@ static void free_fixed_size_memory(void *const allocated, aligned_uint *const bl
             if ( clear_bit(bitmap, shift) )
             {
                 // Success!
-                return;
+                return freed_size;
             }
         } while (1);
     }
@@ -711,7 +766,7 @@ int main(int n, char* args[])
         aligned_uint bitmap = 0x19;      // 00011001
         block[--index] = 1;
         block[--index] = bitmap;
-        free_fixed_size_memory((char*) (block + index) + 4, block);
+        free_fixed_size_memory((char*) (block + index) + 4, block, 0);
         printf("bitmap before free = %llX\n", bitmap);
         printf("bitmap after free = %llX\n", block[index]);
     }
